@@ -1,0 +1,239 @@
+openapi: 3.1.0
+info:
+  title: Order system API
+  description: |-
+    Hybrid authentication model for three client types:
+    - **Customers (TMA)**: via Telegram initData → short-lived JWT
+    - **Partners**: via credentials → JWT + HttpOnly refresh cookie
+    - **Admins**: via credentials → JWT + HttpOnly refresh cookie
+  version: 1.0.0
+
+servers:
+  - url: https://api.ia8f7g.store/api/v1
+    description: Development
+  - url: https://lift.kz/api/v1
+    description: Production
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: Auth
+    description: Authentication operations
+
+paths:
+  /auth/customer/login:
+    post:
+      tags: [Auth]
+      summary: Authenticate via Telegram Mini App
+      operationId: authenticateCustomer
+      security:
+        - initData: []
+      responses:
+        '200':
+          description: JWT issued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResponse"
+        '400':
+          $ref: "#/components/responses/BadRequest"
+        default:
+          $ref: "#/components/responses/UnexpectedError"
+
+  /auth/partner/login:
+    post:
+      tags: [Auth]
+      summary: Authenticate partner
+      operationId: authenticatePartner
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PartnerLoginRequest"
+      responses:
+        '200':
+          description: JWT issued, refresh token set in cookie
+          headers:
+            Set-Cookie:
+              description: HttpOnly refresh token cookie
+              schema:
+                type: string
+                example: refresh_token=...; HttpOnly; Secure; SameSite=Strict; Path=/auth/token/refresh
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResponse"
+        '400':
+          $ref: "#/components/responses/BadRequest"
+        '401':
+          $ref: "#/components/responses/Unauthorized"
+        default:
+          $ref: "#/components/responses/UnexpectedError"
+
+  /auth/admin/login:
+    post:
+      tags: [Auth]
+      summary: Authenticate admin
+      operationId: authenticateAdmin
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AdminLoginRequest"
+      responses:
+        '200':
+          description: JWT issued, refresh token set in cookie
+          headers:
+            Set-Cookie:
+              description: HttpOnly refresh token cookie
+              schema:
+                type: string
+                example: refresh_token=...; HttpOnly; Secure; SameSite=Strict; Path=/auth/token/refresh
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResponse"
+        '401':
+          $ref: "#/components/responses/Unauthorized"
+        default:
+          $ref: "#/components/responses/UnexpectedError"
+
+  /auth/token/refresh:
+    post:
+      tags: [Auth]
+      summary: Rotate refresh token and get new access token
+      operationId: refreshToken
+      security: []
+      responses:
+        '200':
+          description: New access token issued
+          headers:
+            Set-Cookie:
+              description: HttpOnly refresh token cookie
+              schema:
+                type: string
+                example: refresh_token=...; HttpOnly; Secure; SameSite=Strict; Path=/auth/token/refresh
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResponse"
+        '401':
+          $ref: "#/components/responses/Unauthorized"
+        default:
+          $ref: "#/components/responses/UnexpectedError"
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: Invalidate refresh token and clear cookie
+      operationId: logout
+      responses:
+        '204':
+          $ref: "#/components/responses/NoContent"
+        '401':
+          $ref: "#/components/responses/Unauthorized"
+        default:
+          $ref: "#/components/responses/UnexpectedError"
+
+components:
+  schemas:
+    AuthResponse:
+      type: object
+      required: [access_token, token_type, expires_at, role]
+      properties:
+        access_token:
+          type: string
+        token_type:
+          type: string
+          enum: [Bearer]
+        expires_at:
+          type: string
+          format: date-time
+        role:
+          type: string
+          enum: [customer, partner, admin]
+
+    PartnerLoginRequest:
+      type: object
+      required: [partner_id, password]
+      properties:
+        partner_id:
+          type: string
+          minLength: 3
+        password:
+          type: string
+          minLength: 8
+
+    AdminLoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username:
+          type: string
+          minLength: 3
+        password:
+          type: string
+          minLength: 8
+
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          enum:
+            - INVALID_INIT_DATA
+            - INVALID_CREDENTIALS
+            - TOKEN_EXPIRED
+            - TOKEN_INVALID
+            - UNAUTHORIZED
+            - NOT_FOUND
+            - INTERNAL_ERROR
+        message:
+          type: string
+        details:
+          type: object
+          additionalProperties: true
+
+  responses:
+    NoContent:
+      description: Logged out
+      headers:
+        Set-Cookie:
+          description: HttpOnly refresh token cookie
+          schema:
+            type: string
+            example: refresh_token=...; HttpOnly; Secure; SameSite=Strict; Path=/auth/token/refresh
+    BadRequest:
+      description: Bad request
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Unauthorized:
+      description: Unauthorized
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    UnexpectedError:
+      description: Unexpected error
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+    initData:
+      type: apiKey
+      in: header
+      name: X-Telegram-Init-Data
