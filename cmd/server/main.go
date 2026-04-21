@@ -1,117 +1,168 @@
 package main
 
 import (
-	"encoding/json"
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
 	"net/http"
-	"strings"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
-	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/chi/v5/middleware"
-	"github.com/go-chi/cors"
-	"github.com/golang-jwt/jwt/v5"
-	initdata "github.com/telegram-mini-apps/init-data-golang"
+	"github.com/dillybert/backend/config"
+	"github.com/dillybert/backend/internal/auth"
+	"github.com/dillybert/backend/internal/generated/api"
+	"github.com/dillybert/backend/internal/generated/db"
+	"github.com/dillybert/backend/pkg/handlers"
+	"github.com/dillybert/backend/pkg/jwt"
+	"github.com/dillybert/backend/pkg/middleware"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 )
 
-type Claims struct {
-	UserID int64 `json:"user_id"`
-	jwt.RegisteredClaims
-}
-
-func GenerateAccessToken(userID int64, secret string) (string, error) {
-	claims := Claims{
-		UserID: userID,
-		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Minute * 15)),
-		},
+func main() {
+	cfg, err := config.Load(".env")
+	if err != nil {
+		fmt.Printf("failed to load config: %s\n", err.Error())
+		os.Exit(1)
 	}
 
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	logger := setupLogger(cfg.Project.Env)
+	slog.SetDefault(logger)
 
-	return token.SignedString([]byte(secret))
+	pool, err := pgxpool.New(context.Background(), cfg.Postgres.FormatDSN())
+	if err != nil {
+		slog.Error("failed to connect to database", "error", err)
+		os.Exit(1)
+	}
+	defer pool.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := pool.Ping(ctx); err != nil {
+		slog.Error("failed to ping database", "error", err)
+		os.Exit(1)
+	}
+
+	queries := db.New(pool)
+	slog.Info("database connected", "queries", queries)
+
+	redis := redis.NewClient(&redis.Options{
+		Addr:     cfg.Redis.Addr(),
+		Password: cfg.Redis.Password,
+		DB:       cfg.Redis.Database,
+	})
+	defer redis.Close()
+
+	ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := redis.Ping(ctx).Err(); err != nil {
+		slog.Error("failed to ping redis", "error", err)
+		os.Exit(1)
+	}
+
+	jwtManager := jwt.NewManager(
+		cfg.JWT.Secret,
+		cfg.JWT.AccessTTL,
+		cfg.JWT.RefreshTTL,
+	)
+
+	authService := auth.NewService(queries, redis, jwtManager, cfg.Telegram.BotToken)
+	authHandler := auth.NewHandler(authService)
+
+	handler := &handlers.Handler{
+		AuthHandler: authHandler,
+	}
+
+	securityHandler := &handlers.SecurityHandler{
+		JwtManager: jwtManager,
+	}
+
+	server, err := api.NewServer(
+		handler,
+		securityHandler,
+		api.WithMiddleware(
+			middleware.Logger(logger),
+			middleware.Recovery(logger),
+		),
+	)
+	if err != nil {
+		slog.Error("failed to create server", "error", err)
+		os.Exit(1)
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /health", healthHandler)
+	mux.Handle("/", server)
+
+	httpServer := &http.Server{
+		Addr:         fmt.Sprintf(":%d", cfg.Project.Port),
+		Handler:      mux,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  60 * time.Second,
+	}
+
+	serverErr := make(chan error, 1)
+
+	go func() {
+		slog.Info("server starting", "addr", httpServer.Addr, "env", cfg.Project.Env)
+		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serverErr <- err
+		}
+	}()
+
+	// Ждём сигнала завершения или ошибки сервера
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+
+	select {
+	case err := <-serverErr:
+		slog.Error("server error", "error", err)
+	case sig := <-quit:
+		slog.Info("shutdown signal received", "signal", sig)
+	}
+
+	// Даём 30 секунд на завершение текущих запросов
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer shutdownCancel()
+
+	slog.Info("shutting down server...")
+	if err := httpServer.Shutdown(shutdownCtx); err != nil {
+		slog.Error("server forced to shutdown", "error", err)
+	}
+
+	slog.Info("server stopped")
 }
 
-func AuthMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		auth := r.Header.Get("Authorization")
-
-		if auth == "" {
-			http.Error(w, "missing token", http.StatusUnauthorized)
-			return
-		}
-
-		tokenStr := strings.TrimPrefix(auth, "Bearer ")
-
-		token, err := jwt.ParseWithClaims(tokenStr, &Claims{}, func(token *jwt.Token) (interface{}, error) {
-			return []byte("8100097503:AAHxyJ9wBDscrBGQQy6Ax6y_YgEfB6v_aew"), nil
-		})
-
-		if err != nil || !token.Valid {
-			http.Error(w, "invalid token", http.StatusUnauthorized)
-			return
-		}
-
-		next.ServeHTTP(w, r)
-	})
+// ─────────────────────────────────────────
+// healthHandler — простой endpoint для docker healthcheck.
+// Не требует авторизации, отвечает 200 OK если сервер жив.
+// ─────────────────────────────────────────
+func healthHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(`{"status":"ok"}`))
 }
 
-func main() {
-	r := chi.NewRouter()
-	r.Use(middleware.Logger)
-	r.Use(cors.Handler(cors.Options{
-		AllowedOrigins:   []string{"https://eat.ia8f7g.store"},
-		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-Init-Data", "X-CSRF-Token"},
-		ExposedHeaders:   []string{"Link"},
-		AllowCredentials: true,
-		MaxAge:           300,
-	}))
+// Убеждаемся что handler имплементирует интерфейс ogen на этапе компиляции.
+// Эта строка упадёт с ошибкой компилятора если что-то не реализовано.
+var _ api.Handler = (*handlers.Handler)(nil)
 
-	r.Post("/auth/telegram", func(w http.ResponseWriter, r *http.Request) {
-		initData := r.Header.Get("X-Init-Data")
-		if initData == "" {
-			http.Error(w, "missing initData", http.StatusBadRequest)
-			return
-		}
-
-		token := "8100097503:AAHxyJ9wBDscrBGQQy6Ax6y_YgEfB6v_aew"
-		exprIn := 24 * time.Hour
-
-		err := initdata.Validate(initData, token, exprIn)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-
-		data, err := initdata.Parse(initData)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-
-		userId := data.User.ID
-		accessToken, err := GenerateAccessToken(userId, token)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		response := map[string]string{
-			"access_token": accessToken,
-		}
-
-		json.NewEncoder(w).Encode(response)
-	})
-
-	r.Group(func(r chi.Router) {
-		r.Use(AuthMiddleware)
-
-		r.Get("/profile", func(w http.ResponseWriter, r *http.Request) {
-			json.NewEncoder(w).Encode(map[string]string{
-				"name": "Nurkadyr Tulegenov",
-			})
+func setupLogger(env string) *slog.Logger {
+	var handler slog.Handler
+	if env == "production" {
+		handler = slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+			Level: slog.LevelInfo,
 		})
-	})
+	} else {
+		handler = slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+			Level:     slog.LevelDebug,
+			AddSource: true,
+		})
+	}
 
-	http.ListenAndServe(":3000", r)
+	return slog.New(handler)
 }

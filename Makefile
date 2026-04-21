@@ -3,17 +3,10 @@ ifneq (,$(wildcard ./.env))
     export
 endif
 
-
-# ==============================================================================
-# Project Configuration
-# ==============================================================================
-PROJECT_NAME := order-platform
-BINARY_NAME := server
-BUILD_DIR := ./bin
-SRC_DIR := ./cmd/server
-
-# Database (adjust values or use .env file)
-MIGRATIONS_DIR := ./db/migrations
+# Build artifacts
+PROJECT_BINARY_NAME := server
+PROJECT_BUILD_DIR := ./bin
+PROJECT_SRC_DIR := ./cmd/server
 
 # Go parameters
 GOCMD := go
@@ -39,17 +32,17 @@ BUILD_FLAGS := -a -ldflags "-extldflags=-static" -tags netgo
 all: generate build
 
 build:
-	@echo "🔨 Building $(BINARY_NAME)..."
-	@mkdir -p $(BUILD_DIR)
+	@echo "🔨 Building $(PROJECT_BINARY_NAME)..."
+	@mkdir -p $(PROJECT_BUILD_DIR)
 	CGO_ENABLED=$(CGO_ENABLED) GOOS=$(GOOS) GOARCH=$(GOARCH) \
-		$(GOBUILD) $(BUILD_FLAGS) -o $(BUILD_DIR)/$(BINARY_NAME) $(SRC_DIR)
-	@echo "✅ Build complete: $(BUILD_DIR)/$(BINARY_NAME)"
+		$(GOBUILD) $(BUILD_FLAGS) -o $(PROJECT_BUILD_DIR)/$(PROJECT_BINARY_NAME) $(PROJECT_SRC_DIR)
+	@echo "✅ Build complete: $(PROJECT_BUILD_DIR)/$(PROJECT_BINARY_NAME)"
 
 # Build for local OS (for quick testing)
 build-local:
-	@echo "🔨 Building $(BINARY_NAME) for local OS..."
-	@mkdir -p $(BUILD_DIR)
-	$(GOBUILD) -o $(BUILD_DIR)/$(BINARY_NAME) $(SRC_DIR)
+	@echo "🔨 Building $(PROJECT_BINARY_NAME) for local OS..."
+	@mkdir -p $(PROJECT_BUILD_DIR)
+	$(GOBUILD) -o $(PROJECT_BUILD_DIR)/$(PROJECT_BINARY_NAME) $(PROJECT_SRC_DIR)
 	@echo "✅ Local build complete."
 
 # ------------------------------------------------------------------------------
@@ -67,7 +60,7 @@ generate:
 # ------------------------------------------------------------------------------
 run: build-local
 	@echo "🚀 Starting server..."
-	$(BUILD_DIR)/$(BINARY_NAME)
+	$(PROJECT_BUILD_DIR)/$(PROJECT_BINARY_NAME)
 
 test:
 	@echo "🧪 Running tests..."
@@ -76,7 +69,7 @@ test:
 clean:
 	@echo "🧹 Cleaning build artifacts..."
 	$(GOCLEAN)
-	rm -rf $(BUILD_DIR)
+	rm -rf $(PROJECT_BUILD_DIR)
 	@echo "✅ Clean complete."
 
 # Linting (requires golangci-lint installed)
@@ -98,19 +91,20 @@ tidy:
 
 ## Применить все миграции
 migrate-up:
-	docker compose exec app goose -dir db/migrations postgres "$(DATABASE_URL)" up
- 
-## Откатить последнюю миграцию
+	docker compose -p $(PROJECT_NAME) exec app \
+		goose -dir db/migrations postgres "$(POSTGRES_DSN)" up
+
 migrate-down:
-	docker compose exec app goose -dir db/migrations postgres "$(DATABASE_URL)" down
- 
-## Статус миграций
+	docker compose -p $(PROJECT_NAME) exec app \
+		goose -dir db/migrations postgres "$(POSTGRES_DSN)" down
+
 migrate-status:
-	docker compose exec app goose -dir db/migrations postgres "$(DATABASE_URL)" status
- 
-## Создать новую миграцию: make migrate-create name=add_reviews
+	docker compose -p $(PROJECT_NAME) exec app \
+		goose -dir db/migrations postgres "$(POSTGRES_DSN)" status
+
 migrate-create:
-	docker compose exec app goose -dir db/migrations create $(name) sql
+	docker compose -p $(PROJECT_NAME) exec app \
+		goose -dir db/migrations create $(name) sql
 
 # ─────────────────────────────────────────
 # Docker
@@ -118,28 +112,27 @@ migrate-create:
  
 ## Запустить postgres + redis + app
 up:
-	docker compose up -d
- 
-## Запустить с UI инструментами (adminer, redis-commander, mailpit)
+	docker compose -p $(PROJECT_NAME) up -d
+
+## Запустить с UI инструментами
 tools:
-	docker compose --profile tools up -d
- 
+	docker compose -p $(PROJECT_NAME) --profile tools up -d
+
 ## Остановить всё
 down:
-	docker compose down
- 
+	docker compose -p $(PROJECT_NAME) down
+
 ## Пересобрать и запустить
 dev:
-	docker compose up -d --build
- 
+	docker compose -p $(PROJECT_NAME) up -d --build
+
 ## Логи app
 logs:
-	docker compose logs -f app
- 
+	docker compose -p $(PROJECT_NAME) logs -f app
+
 ## Статус контейнеров
 ps:
-	docker compose ps
-
+	docker compose -p $(PROJECT_NAME) ps
 
 
 # ------------------------------------------------------------------------------

@@ -22,6 +22,7 @@ FROM base AS development
 # Air — hot reload для Go
 RUN go install github.com/air-verse/air@latest
 
+# Goose - migrations
 RUN go install github.com/pressly/goose/v3/cmd/goose@latest
 
 COPY . .
@@ -50,7 +51,9 @@ FROM scratch AS production
 
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 COPY --from=builder /app/bin/server /server
+COPY .env .
 
 EXPOSE 8080
 
 ENTRYPOINT ["/server"]
+

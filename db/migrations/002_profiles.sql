@@ -3,6 +3,8 @@
 CREATE TABLE customers (
     id          BIGSERIAL PRIMARY KEY,
     user_id     BIGINT NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+    -- telegram_id используется как chat_id для Bot API push уведомлений.
+    -- В Telegram приватный chat_id == user_id, поэтому отдельное поле не нужно.
     telegram_id BIGINT NOT NULL UNIQUE,
     first_name  TEXT,
     last_name   TEXT,
